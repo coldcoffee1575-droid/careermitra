@@ -851,7 +851,7 @@ function learningPath(r){
 }
 function anchorRealityHTML(r,loading=false){
   if(loading)return '<div class="note info" id="anchor-reality"><b>🌐 Checking the live web...</b><br><span class="muted small">CareerMitra is researching current pay, demand, skills, growth, pathways, alternatives and public review themes.</span></div>';
-  if(!r)return '<div id="anchor-reality"><div class="note warn"><b>Live reality check not loaded yet.</b><br>This career is your personal choice. CareerMitra can research current internet information without replacing that choice.</div><button type="button" class="btn sm" data-act="anchorweb" onclick="window.loadAnchorReality&&window.loadAnchorReality()">🌐 Research this career from the internet</button></div>';
+  if(!r)return '<div id="anchor-reality"><div class="note warn"><b>Live reality check not loaded yet.</b><br>This career is your personal choice. CareerMitra can research current internet information without replacing that choice.</div><button type="button" class="btn sm" onclick="return window.CareerMitraResearch ? window.CareerMitraResearch(this) : false">🌐 Research this career from the internet</button></div>';
   const src=arr(r._sources),linkSources=src.slice(0,12).map(x=>x&&x.url?`<li><a href="${esc(x.url)}" target="_blank" rel="noopener noreferrer">${esc(x.title||x.url)}</a></li>`:'').join('');
   const list=(xs)=>arr(xs).map(x=>`<li>${esc(x)}</li>`).join('');
   return `<div id="anchor-reality"><div class="note ok"><b>🌐 Live web reality check</b><br><span class="muted small">Research generated from current web sources on ${r.generatedAt?new Date(r.generatedAt).toLocaleDateString():new Date().toLocaleDateString()}.</span></div>
@@ -866,10 +866,12 @@ function anchorRealityHTML(r,loading=false){
    <h3>🏆 Rewards</h3><ul>${list(r.rewards)}</ul>
    <h3>💬 What people say online</h3><p class="muted small">These are themes found in public online discussions/reviews, not a scientific survey. Individual experiences can differ by employer, country and career stage.</p><ul>${list(r.reviews)}</ul>
    ${src.length?`<h3>🔗 Sources</h3><ul class="small">${linkSources}</ul>`:''}
-   <button type="button" class="btn ghost sm" data-act="anchorweb" onclick="window.loadAnchorReality&&window.loadAnchorReality()">↻ Refresh live research</button></div>`;
+   <button type="button" class="btn ghost sm" onclick="return window.CareerMitraResearch ? window.CareerMitraResearch(this) : false">↻ Refresh live research</button></div>`;
 }
-async function loadAnchorReality(){
+async function loadAnchorReality(button){
   const s=stu(),name=s&&s.vault&&String(s.vault.nonnegotiable||'').trim();
+  if(button){button.disabled=true;button.textContent='🌐 Researching the career...';}
+
   if(!name)return;
   const box=document.getElementById('anchor-reality');if(box)box.outerHTML=anchorRealityHTML(null,true);
   const prompt=`You are CareerMitra's live career-reality researcher. Research the student's ONE non-negotiable dream career: "${name}". This is an Indian student's career decision support screen. Use web search and current sources. Do not replace, rank, score or judge the student's choice. Give a balanced factual reality check.
@@ -892,37 +894,18 @@ Cover ALL of these:
 Return ONLY valid JSON with exactly this shape:
 {"career":"${name.replace(/"/g,'\\"')}","generatedAt":"${new Date().toISOString()}","overview":"...","pros":["..."],"cons":["..."],"pay":"...","marketRequirements":["..."],"demand":"...","growth":"...","path":["..."],"alternatives":["..."],"struggles":["..."],"rewards":["..."],"reviews":["..."]}
 Keep every array to 3-7 concise points. No markdown. No URLs inside the JSON; source URLs will be captured separately from web-search citations.`;
-  let r=null;
-  try{
-    r=await aiJson(prompt,{webSearch:true});
-  }catch(err){
-    console.error('CareerMitra live career research failed:',err);
-    r=null;
-  }
+  const r=await aiJson(prompt,{webSearch:true});
   const target=document.getElementById('anchor-reality');
   if(r&&typeof r.overview==='string'){
     r.generatedAt=r.generatedAt||new Date().toISOString();
     s.anchorReality=r;touch(s);save();
     if(target)target.outerHTML=anchorRealityHTML(r);
   }else if(target){
-    target.outerHTML='<div class="note warn" id="anchor-reality"><b>Live research could not be loaded.</b><br>Please try again. Your non-negotiable career choice is unchanged.</div><button type="button" class="btn sm" data-act="anchorweb" onclick="window.loadAnchorReality&&window.loadAnchorReality()">↻ Try live research again</button>';
+    target.outerHTML='<div id="anchor-reality"><div class="note warn"><b>Live research could not be loaded.</b><br>Please try again. Your non-negotiable career choice is unchanged.</div><button type="button" class="btn sm" onclick="return window.CareerMitraResearch ? window.CareerMitraResearch(this) : false">↻ Try live research again</button></div>';
   }
+  if(button){button.disabled=false;}
 }
-// Robust live-research click handler: capture the click even after Panel 3 is re-rendered.
-// This avoids relying only on the delegated bubble listener for dynamically-created buttons.
-window.loadAnchorReality = loadAnchorReality;
-document.addEventListener('click', function(e){
-  const btn = e.target && e.target.closest ? e.target.closest('[data-act=\"anchorweb\"]') : null;
-  if(!btn) return;
-  e.preventDefault();
-  e.stopImmediatePropagation();
-  if(btn.dataset.busy === '1') return;
-  btn.dataset.busy = '1';
-  Promise.resolve(window.loadAnchorReality()).finally(()=>{
-    if(btn) btn.dataset.busy = '0';
-  });
-}, true);
-
+window.CareerMitraResearch=loadAnchorReality;
 function anchorCareerBlock(st,an){
   const name=st.vault&&st.vault.nonnegotiable;if(!name)return '';
   const saved=st.anchorReality&&String(st.anchorReality.career||'').toLowerCase()===String(name).toLowerCase()?st.anchorReality:null;
@@ -1207,7 +1190,6 @@ document.addEventListener('click',async e=>{
   else if(a==='satisfied')rate('supportive');
   else if(a==='unsatisfied')rate('unsatisfied');
   else if(a==='genfq')genFQ();
-  else if(a==='anchorweb')loadAnchorReality();
 });
 document.addEventListener('submit',async e=>{
   const form=e.target.closest('[data-form]');if(!form)return;e.preventDefault();
