@@ -170,20 +170,34 @@ async function login(role,email,pw){
 
 /* ================= AI via same-origin Vercel API (with fallbacks) ================= */
 let AI_READY=true;
+window.CM_AI_ERROR='';
 async function ai(){return AI_READY}
 async function aiJson(prompt,opts={}){
   if(!prompt||typeof prompt!=='string')return null;
+  window.CM_AI_ERROR='';
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),opts.webSearch?55000:30000);
   try{
-    const r=await fetch('/api/ai',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,webSearch:!!opts.webSearch})});
-    if(!r.ok){AI_READY=false;return null}
-    const data=await r.json();
+    const r=await fetch('/api/ai',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,webSearch:!!opts.webSearch}),signal:controller.signal});
+    const data=await r.json().catch(()=>null);
+    if(!r.ok){
+      AI_READY=false;
+      window.CM_AI_ERROR=data?.error||`AI request failed (HTTP ${r.status})`;
+      return null;
+    }
     if(data&&data.ok&&data.data&&typeof data.data==='object'){
       AI_READY=true;
       if(Array.isArray(data.sources))data.data._sources=data.sources;
       return data.data;
     }
-    AI_READY=false;return null;
-  }catch(e){AI_READY=false;return null}
+    AI_READY=false;
+    window.CM_AI_ERROR=data?.error||'AI returned an invalid response.';
+    return null;
+  }catch(e){
+    AI_READY=false;
+    window.CM_AI_ERROR=e?.name==='AbortError'?'Live career research took too long. Please try again.':(e?.message||'Network error while contacting AI.');
+    return null;
+  }finally{clearTimeout(timer)}
 }
 
 /* ================= career knowledge base ================= */
@@ -901,7 +915,8 @@ Keep every array to 3-7 concise points. No markdown. No URLs inside the JSON; so
     s.anchorReality=r;touch(s);save();
     if(target)target.outerHTML=anchorRealityHTML(r);
   }else if(target){
-    target.outerHTML='<div id="anchor-reality"><div class="note warn"><b>Live research could not be loaded.</b><br>Please try again. Your non-negotiable career choice is unchanged.</div><button type="button" class="btn sm" onclick="return window.CareerMitraResearch ? window.CareerMitraResearch(this) : false">↻ Try live research again</button></div>';
+    const msg=esc(window.CM_AI_ERROR||'The live research service did not return a usable result.');
+    target.outerHTML='<div id="anchor-reality"><div class="note warn"><b>Live research could not be loaded.</b><br>'+msg+'<br><span class="muted small">Your non-negotiable career choice is unchanged.</span></div><button type="button" class="btn sm" onclick="return window.CareerMitraResearch ? window.CareerMitraResearch(this) : false">↻ Try live research again</button></div>';
   }
   if(button){button.disabled=false;}
 }
