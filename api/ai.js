@@ -1,13 +1,5 @@
 export default async function handler(req, res) {
-  // Simple health check
-  if (req.method === 'GET') {
-    return res.status(200).json({
-      ok: true,
-      apiKeyConfigured: !!process.env.OPENAI_API_KEY,
-      model: process.env.OPENAI_MODEL || 'gpt-6-luna'
-    });
-  }
-
+  // CORS / preflight
   if (req.method === 'OPTIONS') {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -40,6 +32,7 @@ export default async function handler(req, res) {
     });
   }
 
+  // Safety limit
   if (prompt.length > 50000) {
     return res.status(413).json({
       ok: false,
@@ -47,57 +40,60 @@ export default async function handler(req, res) {
     });
   }
 
-  const model = process.env.OPENAI_MODEL || 'gpt-6-luna';
-
   try {
-    const response = await fetch('https://api.openai.com/v1/responses', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        model,
-        input: prompt,
-        max_output_tokens: 5000,
-        store: false
-      })
-    });
+    const response = await fetch(
+      'https://api.openai.com/v1/responses',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          model: process.env.OPENAI_MODEL || 'gpt-6-luna',
+          input: prompt,
+          max_output_tokens: 5000
+        })
+      }
+    );
 
     const raw = await response.text();
 
-    let data;
+    let data = null;
+
     try {
       data = JSON.parse(raw);
     } catch {
       data = null;
     }
 
+    // OpenAI provider error
     if (!response.ok) {
-      const providerError =
-        data?.error?.message ||
-        data?.error?.code ||
-        raw ||
-        'AI provider request failed.';
+      console.error(
+        'OpenAI API error:',
+        response.status,
+        data || raw
+      );
 
-      console.error('OpenAI API error:', {
-        status: response.status,
-        error: providerError
-      });
+      const providerMessage =
+        data?.error?.message ||
+        data?.message ||
+        'AI provider request failed.';
 
       return res.status(502).json({
         ok: false,
-        error: providerError
+        error: providerMessage
       });
     }
 
+    // Responses API output
     const text =
       typeof data?.output_text === 'string'
         ? data.output_text.trim()
         : '';
 
     if (!text) {
-      console.error('OpenAI returned no output text:', data);
+      console.error('OpenAI returned no output_text:', data);
 
       return res.status(502).json({
         ok: false,
@@ -105,17 +101,91 @@ export default async function handler(req, res) {
       });
     }
 
-    // Remove accidental markdown JSON fences
-    const cleaned = text
-      .replace(/^```(?:json)?\s*/i, '')
+    // -----------------------------------------
+    // ROBUST JSON CLEANING
+    // -----------------------------------------
+
+    let cleaned = text.trim();
+
+    // Remove markdown fences
+    cleaned = cleaned
+      .replace(/^```json\s*/i, '')
+      .replace(/^```\s*/i, '')
       .replace(/\s*```$/i, '')
       .trim();
 
-    let parsed;
+    let parsed = null;
 
+    // First: direct JSON
     try {
       parsed = JSON.parse(cleaned);
-    } catch (err) {
+    } catch {
+      parsed = null;
+    }
+
+    // -----------------------------------------
+    // If model added extra text around JSON,
+    // find the first balanced JSON object.
+    // -----------------------------------------
+
+    if (!parsed) {
+      const start = cleaned.indexOf('{');
+
+      if (start !== -1) {
+        let depth = 0;
+        let inString = false;
+        let escaped = false;
+
+        for (let i = start; i < cleaned.length; i++) {
+          const ch = cleaned[i];
+
+          if (escaped) {
+            escaped = false;
+            continue;
+          }
+
+          if (ch === '\\' && inString) {
+            escaped = true;
+            continue;
+          }
+
+          if (ch === '"') {
+            inString = !inString;
+            continue;
+          }
+
+          if (inString) continue;
+
+          if (ch === '{') {
+            depth++;
+          } else if (ch === '}') {
+            depth--;
+
+            if (depth === 0) {
+              const candidate = cleaned.slice(start, i + 1);
+
+              try {
+                parsed = JSON.parse(candidate);
+              } catch {
+                parsed = null;
+              }
+
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    // -----------------------------------------
+    // Final validation
+    // -----------------------------------------
+
+    if (
+      !parsed ||
+      typeof parsed !== 'object' ||
+      Array.isArray(parsed)
+    ) {
       console.error(
         'AI returned invalid JSON:',
         text.slice(0, 2000)
@@ -127,13 +197,32 @@ export default async function handler(req, res) {
       });
     }
 
+    if (!Array.isArray(parsed.questions)) {
+      console.error(
+        'AI JSON missing questions:',
+        parsed
+      );
+
+      return res.status(502).json({
+        ok: false,
+        error: 'AI response does not contain questions.'
+      });
+    }
+
+    // -----------------------------------------
+    // Return exactly what CareerMitra expects
+    // -----------------------------------------
+
     return res.status(200).json({
       ok: true,
       data: parsed
     });
 
   } catch (err) {
-    console.error('AI proxy error:', err);
+    console.error(
+      'CareerMitra AI proxy error:',
+      err
+    );
 
     return res.status(500).json({
       ok: false,
