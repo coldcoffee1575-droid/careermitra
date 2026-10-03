@@ -903,8 +903,22 @@ function anchorRealityHTML(x){
     ${x.researched_at?`<p class="muted small">Research time: ${esc(x.researched_at)}</p>`:''}`;
 }
 
+function scoreStudent(){
+  if(S.uid&&DB.students[S.uid])return DB.students[S.uid];
+  if(!S.score)return null;
+  const u=DB.users.find(x=>x.id===S.score);
+  if(!u)return null;
+  if(u.role==='student')return DB.students[u.id]||null;
+  if(u.role==='family'){
+    const f=DB.families[u.id];
+    const r=f&&f.profile&&studentByCode(f.profile.linkCode);
+    return r?r[1]:null;
+  }
+  return null;
+}
+
 async function loadAnchorReality(button){
-  const s=stu(),name=s&&s.vault&&String(s.vault.nonnegotiable||'').trim();
+  const s=scoreStudent(),name=s&&s.vault&&String(s.vault.nonnegotiable||'').trim();
   if(!name){toast('Please save your non-negotiable career in Personal Vault first.');return false}
   const status=document.getElementById('anchor-research-status');
   if(button){button.disabled=true;button.textContent='🌐 Researching the career...'}
