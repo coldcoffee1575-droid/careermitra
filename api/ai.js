@@ -1,3 +1,5 @@
+export const maxDuration = 60;
+
 export default async function handler(req, res) {
   if (req.method === 'OPTIONS') {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -23,6 +25,7 @@ export default async function handler(req, res) {
   }
 
   const prompt = req.body?.prompt;
+  const webSearch = req.body?.webSearch === true;
 
   if (typeof prompt !== 'string' || !prompt.trim()) {
     return res.status(400).json({
@@ -31,7 +34,7 @@ export default async function handler(req, res) {
     });
   }
 
-  if (prompt.length > 50000) {
+  if (prompt.length > 60000) {
     return res.status(413).json({
       ok: false,
       error: 'Prompt is too large.'
@@ -39,6 +42,55 @@ export default async function handler(req, res) {
   }
 
   try {
+    const payload = {
+      model: webSearch
+        ? (
+            process.env.OPENAI_WEB_MODEL ||
+            process.env.OPENAI_MODEL ||
+            'gpt-5.5'
+          )
+        : (
+            process.env.OPENAI_MODEL ||
+            'gpt-6-luna'
+          ),
+
+      input: prompt,
+
+      max_output_tokens: webSearch
+        ? 7000
+        : 5000
+    };
+
+    /*
+      Panel 3:
+      "Research this career from the internet"
+
+      Web search is explicitly enabled here.
+    */
+    if (webSearch) {
+      payload.tools = [
+        {
+          type: 'web_search',
+          search_context_size: 'high',
+          external_web_access: true
+        }
+      ];
+
+      /*
+        Important:
+        The user explicitly requested internet research,
+        so the model must actually use web search.
+      */
+      payload.tool_choice = 'required';
+
+      /*
+        Return the complete list of sources consulted.
+      */
+      payload.include = [
+        'web_search_call.action.sources'
+      ];
+    }
+
     const response = await fetch(
       'https://api.openai.com/v1/responses',
       {
@@ -49,30 +101,13 @@ export default async function handler(req, res) {
           'Authorization': `Bearer ${apiKey}`
         },
 
-        body: JSON.stringify({
-          model: process.env.OPENAI_MODEL || 'gpt-6-luna',
-
-          input: prompt,
-
-          max_output_tokens: 7000,
-
-          /*
-           * Live internet research.
-           * The model can search current web information
-           * before generating its answer.
-           */
-          tools: [
-            {
-              type: 'web_search'
-            }
-          ]
-        })
+        body: JSON.stringify(payload)
       }
     );
 
     const raw = await response.text();
 
-    let data;
+    let data = null;
 
     try {
       data = JSON.parse(raw);
@@ -80,9 +115,6 @@ export default async function handler(req, res) {
       data = null;
     }
 
-    /*
-     * OpenAI API error
-     */
     if (!response.ok) {
       console.error(
         'OpenAI API error:',
@@ -95,48 +127,135 @@ export default async function handler(req, res) {
         error:
           data?.error?.message ||
           data?.message ||
-          'AI provider request failed.'
+          `AI provider request failed (HTTP ${response.status}).`
       });
     }
 
-    /*
-     * -----------------------------------------
-     * Extract output text
-     * -----------------------------------------
-     */
-
     let text = '';
 
-    // Normal Responses API shortcut
+    const sources = [];
+
+    /*
+      Normal Responses API output_text
+    */
     if (typeof data?.output_text === 'string') {
       text = data.output_text.trim();
     }
 
-    // Responses API output items
-    if (!text && Array.isArray(data?.output)) {
-      for (const item of data.output) {
-        if (!Array.isArray(item?.content)) continue;
+    /*
+      Extract nested output + citations + search sources.
+    */
+    for (
+      const item of Array.isArray(data?.output)
+        ? data.output
+        : []
+    ) {
 
-        for (const content of item.content) {
+      /*
+        Sources returned by web search
+      */
+      const actionSources = item?.action?.sources;
+
+      if (Array.isArray(actionSources)) {
+        for (const src of actionSources) {
+          const u = src?.url;
+
           if (
-            content?.type === 'output_text' &&
-            typeof content?.text === 'string'
+            u &&
+            !sources.some(
+              x => x.url === u
+            )
           ) {
-            text += content.text;
+            sources.push({
+              title: String(
+                src?.title || u
+              ),
+
+              url: String(u)
+            });
           }
         }
       }
 
-      text = text.trim();
+      if (!Array.isArray(item?.content)) {
+        continue;
+      }
+
+      for (const content of item.content) {
+
+        /*
+          Extract output text if output_text
+          wasn't available at the top level.
+        */
+        if (
+          !text &&
+          content?.type === 'output_text' &&
+          typeof content?.text === 'string'
+        ) {
+          text += content.text;
+        }
+
+        /*
+          Extract URL citations.
+        */
+        const annotations =
+          Array.isArray(content?.annotations)
+            ? content.annotations
+            : [];
+
+        for (const ann of annotations) {
+
+          if (
+            ann?.type !== 'url_citation'
+          ) {
+            continue;
+          }
+
+          const u =
+            ann?.url ||
+            ann?.url_citation?.url;
+
+          const title =
+            ann?.title ||
+            ann?.url_citation?.title ||
+            u;
+
+          if (
+            u &&
+            !sources.some(
+              x => x.url === u
+            )
+          ) {
+            sources.push({
+              title: String(title),
+              url: String(u)
+            });
+          }
+        }
+      }
     }
 
-    // Extra fallback
-    if (!text && Array.isArray(data?.output)) {
-      for (const item of data.output) {
-        if (!Array.isArray(item?.content)) continue;
+    /*
+      Final fallback:
+      Search all nested output content for text.
+    */
+    if (
+      !text &&
+      Array.isArray(data?.output)
+    ) {
 
-        for (const content of item.content) {
-          if (typeof content?.text === 'string') {
+      for (const item of data.output) {
+
+        for (
+          const content of
+            Array.isArray(item?.content)
+              ? item.content
+              : []
+        ) {
+
+          if (
+            typeof content?.text === 'string'
+          ) {
             text += content.text;
           }
         }
@@ -148,7 +267,7 @@ export default async function handler(req, res) {
     if (!text) {
       console.error(
         'AI returned no usable text:',
-        JSON.stringify(data).slice(0, 5000)
+        JSON.stringify(data).slice(0, 8000)
       );
 
       return res.status(502).json({
@@ -158,11 +277,9 @@ export default async function handler(req, res) {
     }
 
     /*
-     * -----------------------------------------
-     * Clean markdown JSON fences
-     * -----------------------------------------
-     */
-
+      Remove markdown code fences if model
+      returns ```json ... ```
+    */
     let cleaned = text
       .trim()
       .replace(/^```json\s*/i, '')
@@ -173,29 +290,32 @@ export default async function handler(req, res) {
     let parsed = null;
 
     /*
-     * First try direct JSON
-     */
+      First JSON parse attempt.
+    */
     try {
       parsed = JSON.parse(cleaned);
-    } catch {
-      parsed = null;
-    }
+    } catch {}
 
     /*
-     * -----------------------------------------
-     * Recover JSON if model wrote text around it
-     * -----------------------------------------
-     */
-
+      If direct parsing fails,
+      recover the outer JSON object.
+    */
     if (!parsed) {
+
       const start = cleaned.indexOf('{');
 
       if (start !== -1) {
+
         let depth = 0;
         let inString = false;
         let escaped = false;
 
-        for (let i = start; i < cleaned.length; i++) {
+        for (
+          let i = start;
+          i < cleaned.length;
+          i++
+        ) {
+
           const ch = cleaned[i];
 
           if (escaped) {
@@ -203,7 +323,10 @@ export default async function handler(req, res) {
             continue;
           }
 
-          if (ch === '\\' && inString) {
+          if (
+            ch === '\\' &&
+            inString
+          ) {
             escaped = true;
             continue;
           }
@@ -213,7 +336,9 @@ export default async function handler(req, res) {
             continue;
           }
 
-          if (inString) continue;
+          if (inString) {
+            continue;
+          }
 
           if (ch === '{') {
             depth++;
@@ -223,16 +348,15 @@ export default async function handler(req, res) {
             depth--;
 
             if (depth === 0) {
-              const candidate = cleaned.slice(
-                start,
-                i + 1
-              );
 
               try {
-                parsed = JSON.parse(candidate);
-              } catch {
-                parsed = null;
-              }
+                parsed = JSON.parse(
+                  cleaned.slice(
+                    start,
+                    i + 1
+                  )
+                );
+              } catch {}
 
               break;
             }
@@ -241,20 +365,15 @@ export default async function handler(req, res) {
       }
     }
 
-    /*
-     * -----------------------------------------
-     * Validate JSON
-     * -----------------------------------------
-     */
-
     if (
       !parsed ||
       typeof parsed !== 'object' ||
       Array.isArray(parsed)
     ) {
+
       console.error(
         'Invalid AI JSON:',
-        text.slice(0, 3000)
+        text.slice(0, 4000)
       );
 
       return res.status(502).json({
@@ -263,22 +382,21 @@ export default async function handler(req, res) {
       });
     }
 
-    /*
-     * Test Zone response
-     *
-     * Existing CareerMitra expects:
-     * { questions: [...] }
-     *
-     * Other AI features can return their
-     * own JSON structure.
-     */
-
     return res.status(200).json({
       ok: true,
-      data: parsed
+
+      data: parsed,
+
+      ...(webSearch
+        ? {
+            sources:
+              sources.slice(0, 30)
+          }
+        : {})
     });
 
   } catch (err) {
+
     console.error(
       'CareerMitra AI proxy error:',
       err
@@ -286,7 +404,9 @@ export default async function handler(req, res) {
 
     return res.status(500).json({
       ok: false,
-      error: 'AI service error.'
+      error:
+        err?.message ||
+        'AI service error.'
     });
   }
 }
