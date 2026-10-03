@@ -1,13 +1,6 @@
 export const maxDuration = 60;
 
 export default async function handler(req, res) {
-  if (req.method === 'OPTIONS') {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    return res.status(204).end();
-  }
-
   if (req.method !== 'POST') {
     return res.status(405).json({
       ok: false,
@@ -20,72 +13,56 @@ export default async function handler(req, res) {
   if (!apiKey) {
     return res.status(500).json({
       ok: false,
-      error: 'OPENAI_API_KEY is not configured on the server.'
+      error: 'OPENAI_API_KEY is missing.'
     });
   }
 
   const prompt = req.body?.prompt;
   const webSearch = req.body?.webSearch === true;
 
-  if (typeof prompt !== 'string' || !prompt.trim()) {
+  if (!prompt) {
     return res.status(400).json({
       ok: false,
-      error: 'A prompt is required.'
-    });
-  }
-
-  if (prompt.length > 60000) {
-    return res.status(413).json({
-      ok: false,
-      error: 'Prompt is too large.'
+      error: 'Prompt is required.'
     });
   }
 
   try {
     const payload = {
       model: webSearch
-        ? (
-            process.env.OPENAI_WEB_MODEL ||
-            process.env.OPENAI_MODEL ||
-            'gpt-5.5'
-          )
-        : (
-            process.env.OPENAI_MODEL ||
-            'gpt-6-luna'
-          ),
+        ? (process.env.OPENAI_WEB_MODEL || 'gpt-5.5')
+        : (process.env.OPENAI_MODEL || 'gpt-6-luna'),
 
       input: prompt,
 
-      max_output_tokens: webSearch
-        ? 7000
-        : 5000
+      /*
+       * Much smaller output = faster response.
+       */
+      max_output_tokens: webSearch ? 3200 : 5000
     };
 
-    /*
-      Panel 3:
-      "Research this career from the internet"
-
-      Web search is explicitly enabled here.
-    */
     if (webSearch) {
       payload.tools = [
         {
           type: 'web_search',
-          search_context_size: 'high',
+
+          /*
+           * LOW = faster search.
+           */
+          search_context_size: 'low',
+
+          /*
+           * Must use current/live internet.
+           */
           external_web_access: true
         }
       ];
 
       /*
-        Important:
-        The user explicitly requested internet research,
-        so the model must actually use web search.
-      */
+       * Panel 3 explicitly means "research from internet".
+       */
       payload.tool_choice = 'required';
 
-      /*
-        Return the complete list of sources consulted.
-      */
       payload.include = [
         'web_search_call.action.sources'
       ];
@@ -107,156 +84,54 @@ export default async function handler(req, res) {
 
     const raw = await response.text();
 
-    let data = null;
+    let data;
 
     try {
       data = JSON.parse(raw);
     } catch {
-      data = null;
+      return res.status(502).json({
+        ok: false,
+        error: 'Invalid response from AI service.'
+      });
     }
 
     if (!response.ok) {
       console.error(
-        'OpenAI API error:',
+        'OpenAI error:',
         response.status,
-        data || raw
+        data
       );
 
       return res.status(502).json({
         ok: false,
         error:
           data?.error?.message ||
-          data?.message ||
-          `AI provider request failed (HTTP ${response.status}).`
+          `AI request failed (${response.status}).`
       });
     }
 
+    /*
+     * Responses API normally exposes output_text.
+     */
     let text = '';
 
-    const sources = [];
-
-    /*
-      Normal Responses API output_text
-    */
-    if (typeof data?.output_text === 'string') {
+    if (typeof data.output_text === 'string') {
       text = data.output_text.trim();
     }
 
     /*
-      Extract nested output + citations + search sources.
-    */
-    for (
-      const item of Array.isArray(data?.output)
-        ? data.output
-        : []
-    ) {
-
-      /*
-        Sources returned by web search
-      */
-      const actionSources = item?.action?.sources;
-
-      if (Array.isArray(actionSources)) {
-        for (const src of actionSources) {
-          const u = src?.url;
-
-          if (
-            u &&
-            !sources.some(
-              x => x.url === u
-            )
-          ) {
-            sources.push({
-              title: String(
-                src?.title || u
-              ),
-
-              url: String(u)
-            });
-          }
-        }
-      }
-
-      if (!Array.isArray(item?.content)) {
-        continue;
-      }
-
-      for (const content of item.content) {
-
-        /*
-          Extract output text if output_text
-          wasn't available at the top level.
-        */
-        if (
-          !text &&
-          content?.type === 'output_text' &&
-          typeof content?.text === 'string'
-        ) {
-          text += content.text;
-        }
-
-        /*
-          Extract URL citations.
-        */
-        const annotations =
-          Array.isArray(content?.annotations)
-            ? content.annotations
-            : [];
-
-        for (const ann of annotations) {
-
-          if (
-            ann?.type !== 'url_citation'
-          ) {
-            continue;
-          }
-
-          const u =
-            ann?.url ||
-            ann?.url_citation?.url;
-
-          const title =
-            ann?.title ||
-            ann?.url_citation?.title ||
-            u;
-
-          if (
-            u &&
-            !sources.some(
-              x => x.url === u
-            )
-          ) {
-            sources.push({
-              title: String(title),
-              url: String(u)
-            });
-          }
-        }
-      }
-    }
-
-    /*
-      Final fallback:
-      Search all nested output content for text.
-    */
-    if (
-      !text &&
-      Array.isArray(data?.output)
-    ) {
-
+     * Fallback extraction.
+     */
+    if (!text && Array.isArray(data.output)) {
       for (const item of data.output) {
+        if (!Array.isArray(item.content)) continue;
 
-        for (
-          const content of
-            Array.isArray(item?.content)
-              ? item.content
-              : []
-        ) {
-
+        for (const c of item.content) {
           if (
-            typeof content?.text === 'string'
+            typeof c.text === 'string' &&
+            c.text.trim()
           ) {
-            text += content.text;
+            text += c.text;
           }
         }
       }
@@ -265,11 +140,6 @@ export default async function handler(req, res) {
     }
 
     if (!text) {
-      console.error(
-        'AI returned no usable text:',
-        JSON.stringify(data).slice(0, 8000)
-      );
-
       return res.status(502).json({
         ok: false,
         error: 'AI returned no text.'
@@ -277,11 +147,64 @@ export default async function handler(req, res) {
     }
 
     /*
-      Remove markdown code fences if model
-      returns ```json ... ```
-    */
+     * Collect source URLs.
+     */
+    const sources = [];
+
+    if (Array.isArray(data.output)) {
+      for (const item of data.output) {
+
+        if (Array.isArray(item?.action?.sources)) {
+          for (const s of item.action.sources) {
+            if (
+              s?.url &&
+              !sources.some(x => x.url === s.url)
+            ) {
+              sources.push({
+                title: s.title || s.url,
+                url: s.url
+              });
+            }
+          }
+        }
+
+        if (!Array.isArray(item.content)) continue;
+
+        for (const c of item.content) {
+
+          if (!Array.isArray(c.annotations)) continue;
+
+          for (const a of c.annotations) {
+
+            if (a.type !== 'url_citation') continue;
+
+            const url =
+              a.url ||
+              a.url_citation?.url;
+
+            const title =
+              a.title ||
+              a.url_citation?.title ||
+              url;
+
+            if (
+              url &&
+              !sources.some(x => x.url === url)
+            ) {
+              sources.push({
+                title,
+                url
+              });
+            }
+          }
+        }
+      }
+    }
+
+    /*
+     * Remove markdown code fences.
+     */
     let cleaned = text
-      .trim()
       .replace(/^```json\s*/i, '')
       .replace(/^```\s*/i, '')
       .replace(/\s*```$/i, '')
@@ -289,79 +212,22 @@ export default async function handler(req, res) {
 
     let parsed = null;
 
-    /*
-      First JSON parse attempt.
-    */
     try {
       parsed = JSON.parse(cleaned);
-    } catch {}
-
-    /*
-      If direct parsing fails,
-      recover the outer JSON object.
-    */
-    if (!parsed) {
-
+    } catch {
+      /*
+       * Recover JSON object if model added
+       * a tiny amount of extra text.
+       */
       const start = cleaned.indexOf('{');
+      const end = cleaned.lastIndexOf('}');
 
-      if (start !== -1) {
-
-        let depth = 0;
-        let inString = false;
-        let escaped = false;
-
-        for (
-          let i = start;
-          i < cleaned.length;
-          i++
-        ) {
-
-          const ch = cleaned[i];
-
-          if (escaped) {
-            escaped = false;
-            continue;
-          }
-
-          if (
-            ch === '\\' &&
-            inString
-          ) {
-            escaped = true;
-            continue;
-          }
-
-          if (ch === '"') {
-            inString = !inString;
-            continue;
-          }
-
-          if (inString) {
-            continue;
-          }
-
-          if (ch === '{') {
-            depth++;
-          }
-
-          if (ch === '}') {
-            depth--;
-
-            if (depth === 0) {
-
-              try {
-                parsed = JSON.parse(
-                  cleaned.slice(
-                    start,
-                    i + 1
-                  )
-                );
-              } catch {}
-
-              break;
-            }
-          }
-        }
+      if (start !== -1 && end > start) {
+        try {
+          parsed = JSON.parse(
+            cleaned.slice(start, end + 1)
+          );
+        } catch {}
       }
     }
 
@@ -370,10 +236,9 @@ export default async function handler(req, res) {
       typeof parsed !== 'object' ||
       Array.isArray(parsed)
     ) {
-
       console.error(
-        'Invalid AI JSON:',
-        text.slice(0, 4000)
+        'Invalid JSON from model:',
+        cleaned.slice(0, 3000)
       );
 
       return res.status(502).json({
@@ -384,28 +249,21 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       ok: true,
-
       data: parsed,
-
-      ...(webSearch
-        ? {
-            sources:
-              sources.slice(0, 30)
-          }
-        : {})
+      sources: sources.slice(0, 10)
     });
 
-  } catch (err) {
+  } catch (error) {
 
     console.error(
-      'CareerMitra AI proxy error:',
-      err
+      'CareerMitra API error:',
+      error
     );
 
     return res.status(500).json({
       ok: false,
       error:
-        err?.message ||
+        error?.message ||
         'AI service error.'
     });
   }
