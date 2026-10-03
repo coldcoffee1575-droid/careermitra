@@ -2,101 +2,84 @@ export const maxDuration = 10;
 
 function cleanText(s) {
   return String(s || "")
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
+    .replace(/<[^>]*>/g, " ")
     .replace(/&amp;/g, "&")
     .replace(/&quot;/g, '"')
-    .replace(/&#x27;|&#39;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-function decodeUrl(s) {
-  try {
-    const m = String(s || "").match(/uddg=([^&]+)/i);
-    return m ? decodeURIComponent(m[1]) : s;
-  } catch {
-    return s;
-  }
-}
-
-async function ddgSearch(query, limit = 3) {
+async function searchWeb(query) {
   const url =
-    "https://html.duckduckgo.com/html/?q=" +
+    "https://www.bing.com/search?format=rss&q=" +
     encodeURIComponent(query);
 
   const r = await fetch(url, {
     headers: {
-      "User-Agent":
-        "Mozilla/5.0 (compatible; CareerMitra/1.0)"
+      "User-Agent": "Mozilla/5.0 CareerMitra/1.0"
     }
   });
 
-  if (!r.ok) return [];
+  if (!r.ok) {
+    return [];
+  }
 
-  const html = await r.text();
-  const out = [];
+  const xml = await r.text();
 
-  const re =
-    /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const results = [];
 
-  let m;
+  const items = xml.match(/<item>[\s\S]*?<\/item>/gi) || [];
 
-  while ((m = re.exec(html)) && out.length < limit) {
-    const title = cleanText(m[2]);
-    const href = decodeUrl(m[1]);
+  for (const item of items.slice(0, 5)) {
+    const title =
+      item.match(/<title>([\s\S]*?)<\/title>/i)?.[1] || "";
 
-    const tail = html.slice(
-      re.lastIndex,
-      re.lastIndex + 2500
-    );
+    const link =
+      item.match(/<link>([\s\S]*?)<\/link>/i)?.[1] || "";
 
-    const sm = tail.match(
-      /class="result__snippet"[^>]*>([\s\S]*?)<\/(?:a|div)>/i
-    );
+    const description =
+      item.match(
+        /<description>([\s\S]*?)<\/description>/i
+      )?.[1] || "";
 
-    const snippet = sm ? cleanText(sm[1]) : "";
-
-    if (
-      title &&
-      /^https?:\/\//i.test(href)
-    ) {
-      out.push({
-        title,
-        url: href,
-        snippet
+    if (title && link) {
+      results.push({
+        title: cleanText(title),
+        url: cleanText(link),
+        snippet: cleanText(description)
       });
     }
   }
 
-  return out;
+  return results;
 }
 
 function extractCareer(prompt) {
-  const p = String(prompt || "");
+  const text = String(prompt || "");
 
   const patterns = [
-    /(?:non[- ]negotiable|dream career|exact career|career|profession|role)\s*(?:is|:)\s*["'“”]?([^"'“”\n]+)["'“”]?/i,
-    /career\s*=\s*["'“”]?([^"'“”\n]+)["'“”]?/i
+    /non[- ]negotiable[^:\n]*:\s*["']?([^"'\n]+)["']?/i,
+    /dream career[^:\n]*:\s*["']?([^"'\n]+)["']?/i,
+    /exact career[^:\n]*:\s*["']?([^"'\n]+)["']?/i,
+    /career[^:\n]*:\s*["']?([^"'\n]+)["']?/i
   ];
 
-  for (const re of patterns) {
-    const m = p.match(re);
+  for (const regex of patterns) {
+    const match = text.match(regex);
 
-    if (m?.[1]) {
-      return m[1]
+    if (match?.[1]) {
+      return match[1]
         .trim()
         .replace(/[.,;]+$/, "");
     }
   }
 
-  return "";
+  return text.slice(0, 150);
 }
 
-function extractText(data) {
+function extractModelText(data) {
   if (!data) return "";
 
   if (typeof data.output_text === "string") {
@@ -110,57 +93,48 @@ function extractText(data) {
     return data.choices[0].message.content;
   }
 
-  const parts = [];
-
-  for (const item of data.output || []) {
-    for (const c of item.content || []) {
-      if (typeof c.text === "string") {
-        parts.push(c.text);
-      }
-    }
-  }
-
-  return parts.join("\n");
+  return "";
 }
 
-function parseJson(text) {
+function parseJSON(text) {
+  if (!text) return null;
+
   try {
     return JSON.parse(text);
   } catch {}
 
-  const fenced = String(text || "").match(
-    /```(?:json)?\s*([\s\S]*?)```/i
-  );
+  const match =
+    text.match(/```json\s*([\s\S]*?)```/i);
 
-  if (fenced) {
+  if (match) {
     try {
-      return JSON.parse(fenced[1]);
+      return JSON.parse(match[1]);
     } catch {}
   }
 
-  const m = String(text || "").match(
-    /\{[\s\S]*\}/
-  );
+  const objectMatch =
+    text.match(/\{[\s\S]*\}/);
 
-  if (!m) return null;
-
-  try {
-    return JSON.parse(m[0]);
-  } catch {
-    return null;
+  if (objectMatch) {
+    try {
+      return JSON.parse(objectMatch[0]);
+    } catch {}
   }
+
+  return null;
 }
 
-async function callOpenRouter(prompt) {
-  const key = process.env.OPENROUTER_API_KEY;
+async function callAI(prompt) {
+  const key =
+    process.env.OPENROUTER_API_KEY;
 
   if (!key) {
     throw new Error(
-      "OPENROUTER_API_KEY is not configured in Vercel."
+      "OPENROUTER_API_KEY is missing in Vercel."
     );
   }
 
-  const r = await fetch(
+  const response = await fetch(
     "https://openrouter.ai/api/v1/chat/completions",
     {
       method: "POST",
@@ -168,10 +142,8 @@ async function callOpenRouter(prompt) {
       headers: {
         Authorization: `Bearer ${key}`,
         "Content-Type": "application/json",
-
         "HTTP-Referer":
           "https://careermitra-zeta.vercel.app/",
-
         "X-Title": "CareerMitra"
       },
 
@@ -182,38 +154,50 @@ async function callOpenRouter(prompt) {
           {
             role: "system",
             content:
-              "You are CareerMitra. Return valid JSON only when asked. Never invent current facts. Clearly mark anecdotal internet discussion themes as anecdotal."
+              "You are CareerMitra. Give accurate career research. Use the supplied web research. Never invent facts. Return valid JSON only."
           },
-
           {
             role: "user",
             content: prompt
           }
         ],
 
-        max_tokens: 2200,
+        temperature: 0.2,
 
-        temperature: 0.2
+        max_tokens: 2200
       })
     }
   );
 
-  const raw = await r.text();
+  const raw = await response.text();
 
-  let data = null;
+  let data;
 
   try {
     data = JSON.parse(raw);
-  } catch {}
-
-  if (!r.ok) {
+  } catch {
     throw new Error(
-      data?.error?.message ||
-      `OpenRouter HTTP ${r.status}`
+      "Invalid response from OpenRouter."
     );
   }
 
-  return data;
+  if (!response.ok) {
+    throw new Error(
+      data?.error?.message ||
+      `OpenRouter error ${response.status}`
+    );
+  }
+
+  const text =
+    extractModelText(data);
+
+  if (!text) {
+    throw new Error(
+      "OpenRouter returned an empty response. Please retry."
+    );
+  }
+
+  return text;
 }
 
 export default async function handler(req, res) {
@@ -241,86 +225,115 @@ export default async function handler(req, res) {
       req.body?.webSearch === true;
 
     let finalPrompt = prompt;
-
-    const sources = [];
+    let sources = [];
 
     if (webSearch) {
       const career =
-        extractCareer(prompt) ||
-        prompt.slice(0, 140);
+        extractCareer(prompt);
 
       const queries = [
-        `"${career}" India salary demand career`,
-        `"${career}" India experience review Reddit`
+        `"${career}" India career salary demand`,
+        `"${career}" India job requirements`,
+        `"${career}" India career path`,
+        `"${career}" Reddit experience`
       ];
 
-      const batches = await Promise.all(
-        queries.map(q => ddgSearch(q, 4))
-      );
+      const searchResults =
+        await Promise.all(
+          queries.map(q => searchWeb(q))
+        );
 
       const seen = new Set();
 
-      for (const item of batches.flat()) {
-        if (!seen.has(item.url)) {
-          seen.add(item.url);
-          sources.push(item);
+      for (const result of searchResults.flat()) {
+        if (!seen.has(result.url)) {
+          seen.add(result.url);
+          sources.push(result);
         }
       }
 
-      finalPrompt = `${prompt}
+      sources = sources.slice(0, 12);
 
-LIVE WEB RESEARCH RESULTS:
+      const researchText =
+        sources.length
+          ? sources
+              .map(
+                (s, i) =>
+                  `[SOURCE ${i + 1}]
+Title: ${s.title}
+URL: ${s.url}
+Information: ${s.snippet}`
+              )
+              .join("\n\n")
+          : "No external search results were retrieved.";
 
-${sources
-  .slice(0, 8)
-  .map(
-    (x, i) =>
-      `[${i + 1}] ${x.title}
-URL: ${x.url}
-Snippet: ${x.snippet}`
-  )
-  .join("\n\n")}
+      finalPrompt = `
+You are researching this exact career:
 
-Research rules:
+${career}
 
-- Use the supplied web results for current claims.
-- Do not invent salary numbers, demand statistics, or URLs.
-- Clearly label Reddit/forum/review material as anecdotal.
-- If evidence is missing, say that it is not established by the retrieved sources.
-- Return JSON only.`;
+User's original request:
+
+${prompt}
+
+CURRENT INTERNET SEARCH RESULTS:
+
+${researchText}
+
+Prepare a factual career research report.
+
+Return ONLY valid JSON in this exact structure:
+
+{
+  "career": "",
+  "what_it_involves": "",
+  "pros": [],
+  "cons": [],
+  "earning_reality_india": "",
+  "market_requirements": [],
+  "demand": "",
+  "growth_future": "",
+  "step_by_step_path": [],
+  "same_level_alternatives": [],
+  "struggles_barriers": [],
+  "rewards_beyond_money": [],
+  "anecdotal_reviews": [],
+  "sources": []
+}
+
+Rules:
+
+1. Use current search results where relevant.
+2. Do not invent salary figures.
+3. If exact salary data is unavailable, say so.
+4. Reddit/forum material must be labelled anecdotal.
+5. Sources must contain actual URLs from the supplied results.
+6. Keep answers concise but useful.
+7. Do not make up sources.
+`;
     }
-
-    const data =
-      await callOpenRouter(finalPrompt);
 
     const text =
-      extractText(data);
+      await callAI(finalPrompt);
 
     const parsed =
-      parseJson(text);
-
-    if (parsed) {
-      return res.status(200).json({
-        ok: true,
-        data: parsed,
-        sources
-      });
-    }
+      parseJSON(text);
 
     return res.status(200).json({
       ok: true,
-      data: {
-        text
-      },
+      data:
+        parsed || {
+          text
+        },
       sources
     });
 
-  } catch (e) {
+  } catch (error) {
     return res.status(502).json({
       ok: false,
-      error: String(
-        e?.message || e
-      )
+      error:
+        error?.message ||
+        "Unknown API error"
     });
   }
 }
