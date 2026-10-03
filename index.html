@@ -171,13 +171,17 @@ async function login(role,email,pw){
 /* ================= AI via same-origin Vercel API (with fallbacks) ================= */
 let AI_READY=true;
 async function ai(){return AI_READY}
-async function aiJson(prompt){
+async function aiJson(prompt,opts={}){
   if(!prompt||typeof prompt!=='string')return null;
   try{
-    const r=await fetch('/api/ai',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt})});
+    const r=await fetch('/api/ai',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,webSearch:!!opts.webSearch})});
     if(!r.ok){AI_READY=false;return null}
     const data=await r.json();
-    if(data&&data.ok&&data.data&&typeof data.data==='object'){AI_READY=true;return data.data}
+    if(data&&data.ok&&data.data&&typeof data.data==='object'){
+      AI_READY=true;
+      if(Array.isArray(data.sources))data.data._sources=data.sources;
+      return data.data;
+    }
     AI_READY=false;return null;
   }catch(e){AI_READY=false;return null}
 }
@@ -669,7 +673,7 @@ function enterSession(u,welcome){
 
 /* ================= steps ================= */
 const isLocked=(L,i)=>L.slice(0,i).some(x=>!x.done);
-function firstOpen(L){return L.find(x=>!x.done)||L[L.length-1];}
+const firstOpen=L=>L.find(x=>!x.done)||L[L.length-1];
 function sSteps(s){return[
  {k:'profile',l:'Profile',done:!!s.profile},
  {k:'vault',l:'Personal Vault',done:vaultDone(s)},
@@ -845,8 +849,62 @@ function learningPath(r){
   if(/marketing|business manager/.test(n))return{academic:'BBA/B.Com/any relevant UG; MBA optional',vocational:'Sales/marketing diploma',cert:['Digital marketing','Analytics','CRM'],skills:['Communication','Sales','Marketing analytics','Negotiation','Presentation']};
   return{academic:'Relevant bachelor’s degree; higher study if the role requires it',vocational:'Relevant diploma / polytechnic / ITI route where applicable',cert:['Role-specific fundamentals certification'],skills:['Core subject knowledge','Communication','Problem solving','Portfolio/project work']};
 }
+function anchorRealityHTML(r,loading=false){
+  if(loading)return '<div class="note info" id="anchor-reality"><b>🌐 Checking the live web...</b><br><span class="muted small">CareerMitra is researching current pay, demand, skills, growth, pathways, alternatives and public review themes.</span></div>';
+  if(!r)return '<div id="anchor-reality"><div class="note warn"><b>Live reality check not loaded yet.</b><br>This career is your personal choice. CareerMitra can research current internet information without replacing that choice.</div><button type="button" class="btn sm" data-act="anchorweb">🌐 Research this career from the internet</button></div>';
+  const src=arr(r._sources),linkSources=src.slice(0,12).map(x=>x&&x.url?`<li><a href="${esc(x.url)}" target="_blank" rel="noopener noreferrer">${esc(x.title||x.url)}</a></li>`:'').join('');
+  const list=(xs)=>arr(xs).map(x=>`<li>${esc(x)}</li>`).join('');
+  return `<div id="anchor-reality"><div class="note ok"><b>🌐 Live web reality check</b><br><span class="muted small">Research generated from current web sources on ${r.generatedAt?new Date(r.generatedAt).toLocaleDateString():new Date().toLocaleDateString()}.</span></div>
+   <h3>What this career actually involves</h3><p>${esc(r.overview||'')}</p>
+   <div class="pc"><div class="pros"><h4>Potential benefits</h4><ul>${list(r.pros)}</ul></div><div class="cons"><h4>Trade-offs & downsides</h4><ul>${list(r.cons)}</ul></div></div>
+   <h3>💰 Pay & earning reality</h3><p>${esc(r.pay||'')}</p>
+   <h3>📈 Market demand & requirements</h3><ul>${list(r.marketRequirements)}</ul><p><b>Demand:</b> ${esc(r.demand||'')}</p>
+   <h3>🚀 Growth</h3><p>${esc(r.growth||'')}</p>
+   <h3>🛣️ Path to reach the role</h3><ol>${list(r.path)}</ol>
+   <h3>🔁 Same-level alternatives</h3><ul>${list(r.alternatives)}</ul>
+   <h3>⚠️ Real struggles</h3><ul>${list(r.struggles)}</ul>
+   <h3>🏆 Rewards</h3><ul>${list(r.rewards)}</ul>
+   <h3>💬 What people say online</h3><p class="muted small">These are themes found in public online discussions/reviews, not a scientific survey. Individual experiences can differ by employer, country and career stage.</p><ul>${list(r.reviews)}</ul>
+   ${src.length?`<h3>🔗 Sources</h3><ul class="small">${linkSources}</ul>`:''}
+   <button type="button" class="btn ghost sm" data-act="anchorweb">↻ Refresh live research</button></div>`;
+}
+async function loadAnchorReality(){
+  const s=stu(),name=s&&s.vault&&String(s.vault.nonnegotiable||'').trim();
+  if(!name)return;
+  const box=document.getElementById('anchor-reality');if(box)box.outerHTML=anchorRealityHTML(null,true);
+  const prompt=`You are CareerMitra's live career-reality researcher. Research the student's ONE non-negotiable dream career: "${name}". This is an Indian student's career decision support screen. Use web search and current sources. Do not replace, rank, score or judge the student's choice. Give a balanced factual reality check.
+
+Search for multiple current and credible sources. Prefer official government/professional bodies, universities, major employers and reputable labour-market/job sources for pay, demand, education and requirements. For public experience/review themes, use clearly identified public review/discussion sources and label them as anecdotal. Distinguish India-specific facts from global information. Do not invent exact salaries or demand numbers. If reliable data is unavailable, say so. Avoid treating one person's review as representative.
+
+Cover ALL of these:
+1. What the role actually involves.
+2. Potential benefits/pros.
+3. Cons/trade-offs.
+4. Current pay/earning reality in India where reliable data exists; give ranges and explain variation by experience, employer and location.
+5. Market demand and what employers currently require.
+6. Growth and how the role can change over 5-10 years; clearly label uncertainty.
+7. A practical step-by-step path from the student's current stage to the role, including degrees/exams/training where relevant, but do not assume a single path if several exist.
+8. Same-level alternatives: roles with broadly comparable seniority/education level, not merely junior substitutes.
+9. Common struggles and barriers.
+10. Rewards beyond money.
+11. Themes from public internet reviews/discussions, clearly described as anecdotal and attributed by source type.
+
+Return ONLY valid JSON with exactly this shape:
+{"career":"${name.replace(/"/g,'\\"')}","generatedAt":"${new Date().toISOString()}","overview":"...","pros":["..."],"cons":["..."],"pay":"...","marketRequirements":["..."],"demand":"...","growth":"...","path":["..."],"alternatives":["..."],"struggles":["..."],"rewards":["..."],"reviews":["..."]}
+Keep every array to 3-7 concise points. No markdown. No URLs inside the JSON; source URLs will be captured separately from web-search citations.`;
+  const r=await aiJson(prompt,{webSearch:true});
+  const target=document.getElementById('anchor-reality');
+  if(r&&typeof r.overview==='string'){
+    r.generatedAt=r.generatedAt||new Date().toISOString();
+    s.anchorReality=r;touch(s);save();
+    if(target)target.outerHTML=anchorRealityHTML(r);
+  }else if(target){
+    target.outerHTML='<div class="note warn" id="anchor-reality"><b>Live research could not be loaded.</b><br>Please try again. Your non-negotiable career choice is unchanged.</div><button type="button" class="btn sm" data-act="anchorweb">↻ Try live research again</button>';
+  }
+}
 function anchorCareerBlock(st,an){
-  const name=st.vault&&st.vault.nonnegotiable; if(!name)return '';
+  const name=st.vault&&st.vault.nonnegotiable;if(!name)return '';
+  const saved=st.anchorReality&&String(st.anchorReality.career||'').toLowerCase()===String(name).toLowerCase()?st.anchorReality:null;
   const r=careerRecord(name);
   const linked=an.roles.find(x=>x.vaultMatch&&String(x.n).toLowerCase()===String(name).toLowerCase())||r;
   const path=learningPath(linked||{n:name});
@@ -854,9 +912,11 @@ function anchorCareerBlock(st,an){
   const concerns=fams.flatMap(([id,f])=>arr(f.qa).filter(x=>x.accepted));
   const concernRows=concerns.length?concerns.map(x=>`<div class="qa"><b>${esc(x.q)}</b><p style="margin:4px 0">“${esc(x.a)}”</p><div class="note info small">${esc(anchorConcernCheck(x.a,linked||{n:name}))}</div></div>`).join(''):'<p class="muted">No family concern answers have been recorded yet. The role will be checked again when the family completes the concern questions.</p>';
   return`<div class="card" style="border-width:2px"><div class="row sp"><div><div class="muted small">Your anchor career</div><h2 style="margin:3px 0">❤️ ${esc(name)}</h2></div><span class="pill y">Non-negotiable choice</span></div><p>This career is shown separately from the test-ranked roles. CareerMitra does not silently replace your personal choice with a higher test fit.</p>
-   ${r?`<h3>Reality check</h3><div class="pc"><div class="pros"><h4>Pros</h4><ul>${r.pros.map(x=>`<li>${esc(x)}</li>`).join('')}</ul></div><div class="cons"><h4>Cons / trade-offs</h4><ul>${r.cons.map(x=>`<li>${esc(x)}</li>`).join('')}</ul></div></div><h3>Market, pay & growth</h3><p>${esc(r.mkt)}</p><p class="muted small">Pay is indicative, not guaranteed. Growth depends on role, employer, location, skills and experience.</p><h3>Education & learning pathway</h3><p><b>🎓 Academic:</b> ${esc(path.academic)}</p><p><b>🛠️ Vocational:</b> ${esc(path.vocational)}</p><p><b>📜 Certifications:</b> ${path.cert.map(esc).join(', ')}</p><p><b>💻 Job-ready skills:</b> ${path.skills.map(esc).join(', ')}</p>`:`<div class="note warn">This exact career is not yet in CareerMitra’s structured career database, so detailed market/pay/future data is not available for it yet. Your choice is still preserved and shown; add a closely matching role to the preferred roles if you want a structured reality check.</div>`}
+   ${r?`<h3>Current CareerMitra knowledge</h3><div class="pc"><div class="pros"><h4>Pros</h4><ul>${r.pros.map(x=>`<li>${esc(x)}</li>`).join('')}</ul></div><div class="cons"><h4>Cons / trade-offs</h4><ul>${r.cons.map(x=>`<li>${esc(x)}</li>`).join('')}</ul></div></div><h3>Market, pay & growth</h3><p>${esc(r.mkt)}</p><p class="muted small">This built-in data is only a baseline. The live web research below is the current reality check.</p><h3>Education & learning pathway</h3><p><b>🎓 Academic:</b> ${esc(path.academic)}</p><p><b>🛠️ Vocational:</b> ${esc(path.vocational)}</p><p><b>📜 Certifications:</b> ${path.cert.map(esc).join(', ')}</p><p><b>💻 Job-ready skills:</b> ${path.skills.map(esc).join(', ')}</p>`:''}
+   <h3>🌐 Live internet reality check</h3>${anchorRealityHTML(saved)}
    <h3>Parent concerns checked against this career</h3>${concernRows}</div>`;
 }
+
 function anchorConcernCheck(text,r){
   const t=String(text||'').toLowerCase(),m=String(r.mkt||'').toLowerCase();
   if(/salary|income|pay|earning|money|financial|fee|cost|loan|afford/.test(t))return`Salary/financial concern → ${r.n?r.n+' market reference: '+r.mkt:'compare this career against its actual education cost and expected earnings.'}`;
@@ -1126,6 +1186,7 @@ document.addEventListener('click',async e=>{
   else if(a==='satisfied')rate('supportive');
   else if(a==='unsatisfied')rate('unsatisfied');
   else if(a==='genfq')genFQ();
+  else if(a==='anchorweb')loadAnchorReality();
 });
 document.addEventListener('submit',async e=>{
   const form=e.target.closest('[data-form]');if(!form)return;e.preventDefault();
