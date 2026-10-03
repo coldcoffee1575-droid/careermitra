@@ -43,14 +43,29 @@ export default async function handler(req, res) {
       'https://api.openai.com/v1/responses',
       {
         method: 'POST',
+
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${apiKey}`
         },
+
         body: JSON.stringify({
           model: process.env.OPENAI_MODEL || 'gpt-6-luna',
+
           input: prompt,
-          max_output_tokens: 5000
+
+          max_output_tokens: 7000,
+
+          /*
+           * Live internet research.
+           * The model can search current web information
+           * before generating its answer.
+           */
+          tools: [
+            {
+              type: 'web_search'
+            }
+          ]
         })
       }
     );
@@ -65,7 +80,9 @@ export default async function handler(req, res) {
       data = null;
     }
 
-    // OpenAI API error
+    /*
+     * OpenAI API error
+     */
     if (!response.ok) {
       console.error(
         'OpenAI API error:',
@@ -82,19 +99,20 @@ export default async function handler(req, res) {
       });
     }
 
-    // -----------------------------------------
-    // GET TEXT FROM RESPONSES API
-    // -----------------------------------------
+    /*
+     * -----------------------------------------
+     * Extract output text
+     * -----------------------------------------
+     */
 
     let text = '';
 
-    // Some responses may provide output_text
+    // Normal Responses API shortcut
     if (typeof data?.output_text === 'string') {
       text = data.output_text.trim();
     }
 
-    // Raw Responses API format:
-    // output -> message -> content -> output_text -> text
+    // Responses API output items
     if (!text && Array.isArray(data?.output)) {
       for (const item of data.output) {
         if (!Array.isArray(item?.content)) continue;
@@ -112,7 +130,7 @@ export default async function handler(req, res) {
       text = text.trim();
     }
 
-    // Extra fallback for any text content
+    // Extra fallback
     if (!text && Array.isArray(data?.output)) {
       for (const item of data.output) {
         if (!Array.isArray(item?.content)) continue;
@@ -129,7 +147,7 @@ export default async function handler(req, res) {
 
     if (!text) {
       console.error(
-        'AI returned no usable text.',
+        'AI returned no usable text:',
         JSON.stringify(data).slice(0, 5000)
       );
 
@@ -139,9 +157,11 @@ export default async function handler(req, res) {
       });
     }
 
-    // -----------------------------------------
-    // CLEAN JSON
-    // -----------------------------------------
+    /*
+     * -----------------------------------------
+     * Clean markdown JSON fences
+     * -----------------------------------------
+     */
 
     let cleaned = text
       .trim()
@@ -152,16 +172,20 @@ export default async function handler(req, res) {
 
     let parsed = null;
 
-    // Try direct JSON
+    /*
+     * First try direct JSON
+     */
     try {
       parsed = JSON.parse(cleaned);
     } catch {
       parsed = null;
     }
 
-    // -----------------------------------------
-    // Find JSON object if model added extra text
-    // -----------------------------------------
+    /*
+     * -----------------------------------------
+     * Recover JSON if model wrote text around it
+     * -----------------------------------------
+     */
 
     if (!parsed) {
       const start = cleaned.indexOf('{');
@@ -193,11 +217,16 @@ export default async function handler(req, res) {
 
           if (ch === '{') {
             depth++;
-          } else if (ch === '}') {
+          }
+
+          if (ch === '}') {
             depth--;
 
             if (depth === 0) {
-              const candidate = cleaned.slice(start, i + 1);
+              const candidate = cleaned.slice(
+                start,
+                i + 1
+              );
 
               try {
                 parsed = JSON.parse(candidate);
@@ -212,9 +241,11 @@ export default async function handler(req, res) {
       }
     }
 
-    // -----------------------------------------
-    // Validate response
-    // -----------------------------------------
+    /*
+     * -----------------------------------------
+     * Validate JSON
+     * -----------------------------------------
+     */
 
     if (
       !parsed ||
@@ -223,7 +254,7 @@ export default async function handler(req, res) {
     ) {
       console.error(
         'Invalid AI JSON:',
-        text.slice(0, 2000)
+        text.slice(0, 3000)
       );
 
       return res.status(502).json({
@@ -232,17 +263,15 @@ export default async function handler(req, res) {
       });
     }
 
-    if (!Array.isArray(parsed.questions)) {
-      console.error(
-        'AI JSON has no questions:',
-        parsed
-      );
-
-      return res.status(502).json({
-        ok: false,
-        error: 'AI response does not contain questions.'
-      });
-    }
+    /*
+     * Test Zone response
+     *
+     * Existing CareerMitra expects:
+     * { questions: [...] }
+     *
+     * Other AI features can return their
+     * own JSON structure.
+     */
 
     return res.status(200).json({
       ok: true,
