@@ -669,7 +669,7 @@ function enterSession(u,welcome){
 
 /* ================= steps ================= */
 const isLocked=(L,i)=>L.slice(0,i).some(x=>!x.done);
-const firstOpen=L=>L.find(x=>!x.done)||L[L.length-1];
+function firstOpen(L){return L.find(x=>!x.done)||L[L.length-1];}
 function sSteps(s){return[
  {k:'profile',l:'Profile',done:!!s.profile},
  {k:'vault',l:'Personal Vault',done:vaultDone(s)},
